@@ -1,0 +1,42 @@
+name: ulab_bus
+description: "A new Flutter project."
+
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  google_maps_flutter: ^2.14.0
+  geolocator: ^14.0.2
+  http: ^1.6.0
+  shared_preferences: ^2.5.3
+  flutter_local_notifications: ^19.5.0
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
+  location: ^8.0.1
+  connectivity_plus: ^7.0.0
+  supabase_flutter: ^2.10.3
+  postgrest: ^2.5.0
+  realtime_client: ^2.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+
+# Add web-specific configuration at root level
+web:
+  renderer: html
