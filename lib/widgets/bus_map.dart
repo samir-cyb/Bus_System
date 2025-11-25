@@ -1,27 +1,21 @@
+import 'dart:async'; // Needed for Timer
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:ulab_bus/core/logger.dart';
 import 'package:ulab_bus/core/models.dart';
-import 'package:ulab_bus/services/supabase_service.dart';
-import 'package:ulab_bus/services/location_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:intl/intl.dart';
 
 class BusMap extends StatefulWidget {
   final String userType;
   final String userId;
-  final String? busNumber;
-  final bool? isTripActive;
-  final Function(bool)? onTripStatusChanged;
   final VoidCallback? onBookTicket;
 
   const BusMap({
     super.key,
     required this.userType,
     required this.userId,
-    this.busNumber,
-    this.isTripActive,
-    this.onTripStatusChanged,
     this.onBookTicket,
   });
 
@@ -31,344 +25,372 @@ class BusMap extends StatefulWidget {
 
 class _BusMapState extends State<BusMap> {
   final MapController _mapController = MapController();
-  final LocationService _locationService = LocationService();
-  List<BusLocation> _busLocations = [];
-  List<Alert> _recentAlerts = [];
-  bool _isLoading = true;
-  Position? _currentPosition;
-  bool _isTrackingLocation = false;
+  final _supabase = Supabase.instance.client;
+
+  // State Variables
+  List<BusRoute> _routes = [];
+  BusRoute? _selectedRoute;
+  List<LatLng> _routePoints = [];
+  List<BusLocation> _activeBuses = [];
+  List<Map<String, dynamic>> _activeAlerts = [];
+
+  // Logic for filtering alerts
+  String? _myActiveBusId;
+  Timer? _ticketCheckTimer; // Timer to keep checking ticket status
+
+  bool _isLoadingRoutes = true;
+  final LatLng _ulabLocation = const LatLng(23.7629, 90.3582);
 
   @override
   void initState() {
     super.initState();
-    _initializeMap();
-  }
+    _loadRoutes();
+    _listenToBusLocations();
 
-  Future<void> _initializeMap() async {
-    try {
-      // Initialize location service
-      await _locationService.initializeLocationService();
+    // Initial check
+    _checkTicketAndSetupAlerts();
 
-      // Get current location
-      _currentPosition = await _locationService.getCurrentLocation();
-
-      // Initialize real-time data
-      _initializeRealTimeData();
-
-      setState(() {
-        _isLoading = false;
-      });
-    } catch (e) {
-      AppLogger.error('Failed to initialize map', tag: 'BUS_MAP', error: e);
-      setState(() {
-        _isLoading = false;
+    // Set up a timer to re-check ticket status every 60 seconds
+    if (widget.userType == 'student') {
+      _ticketCheckTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
+        _fetchActiveTicket();
       });
     }
   }
 
-  void _initializeRealTimeData() {
-    // Subscribe to real-time bus locations
-    SupabaseService().getBusLocationsStream().listen((locations) {
-      if (mounted) {
-        setState(() {
-          _busLocations = locations;
-        });
-      }
-    });
-
-    // Load initial alerts
-    _loadAlerts();
-  }
-
-  Future<void> _loadAlerts() async {
-    try {
-      final alerts = await SupabaseService().getRecentAlerts();
-      if (mounted) {
-        setState(() {
-          _recentAlerts = alerts;
-        });
-      }
-    } catch (e) {
-      AppLogger.error('Failed to load alerts', tag: 'BUS_MAP', error: e);
+  @override
+  void didUpdateWidget(BusMap oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // CRITICAL: When parent rebuilds (e.g. returning from booking), re-check ticket!
+    if (widget.userType == 'student') {
+      _fetchActiveTicket();
     }
-  }
-
-  Future<void> _updateMyLocation() async {
-    try {
-      final position = await _locationService.getCurrentLocation();
-      if (position != null && mounted) {
-        setState(() {
-          _currentPosition = position;
-        });
-
-        // Center map on new location
-        _mapController.move(
-          LatLng(position.latitude, position.longitude),
-          15.0,
-        );
-      }
-    } catch (e) {
-      AppLogger.error('Failed to update location', tag: 'BUS_MAP', error: e);
-    }
-  }
-
-  void _startLocationTracking() {
-    if (_isTrackingLocation) return;
-
-    _isTrackingLocation = true;
-    _locationService.startLocationTracking(
-      widget.busNumber ?? 'unknown',
-      widget.userId,
-          (location) {
-        // Location updates will be handled by the stream
-        AppLogger.debug('Location updated: ${location.latitude}, ${location.longitude}', tag: 'BUS_MAP');
-      },
-    );
-  }
-
-  void _stopLocationTracking() {
-    _isTrackingLocation = false;
-    _locationService.stopLocationTracking();
   }
 
   @override
   void dispose() {
-    if (widget.userType == 'driver' && _isTrackingLocation) {
-      _stopLocationTracking();
-    }
+    _ticketCheckTimer?.cancel();
     super.dispose();
+  }
+
+  void _checkTicketAndSetupAlerts() {
+    if (widget.userType == 'student') {
+      _fetchActiveTicket();
+    }
+    // Always start listening, but the listener itself handles the filtering logic
+    _listenToAlerts();
+  }
+
+  Future<void> _fetchActiveTicket() async {
+    try {
+      // Look for a ticket purchased in the last 12 hours
+      final twelveHoursAgo = DateTime.now().subtract(const Duration(hours: 12));
+
+      final response = await _supabase
+          .from('tickets')
+          .select()
+          .eq('student_id', widget.userId)
+          .gt('purchase_time', twelveHoursAgo.toIso8601String())
+          .order('purchase_time', ascending: false)
+          .limit(1)
+          .maybeSingle();
+
+      if (mounted) {
+        setState(() {
+          if (response != null) {
+            _myActiveBusId = response['bus_id'];
+            AppLogger.debug("Active Ticket found for: $_myActiveBusId", tag: "BUS_MAP");
+          } else {
+            _myActiveBusId = null;
+            // If ticket expired or doesn't exist, clear alerts immediately
+            _activeAlerts = [];
+            AppLogger.debug("No active ticket found.", tag: "BUS_MAP");
+          }
+        });
+      }
+    } catch (e) {
+      AppLogger.error('Failed to fetch active ticket', tag: 'BUS_MAP', error: e);
+    }
+  }
+
+  Future<void> _loadRoutes() async {
+    try {
+      final response = await _supabase.from('bus_routes').select().eq('is_active', true);
+      final routes = (response as List).map((data) => BusRoute.fromMap(data)).toList();
+
+      if (mounted) {
+        setState(() {
+          _routes = routes;
+          _isLoadingRoutes = false;
+        });
+      }
+    } catch (e) {
+      AppLogger.error('Failed to load routes', tag: 'BUS_MAP', error: e);
+    }
+  }
+
+  Future<void> _onRouteSelected(BusRoute? route) async {
+    if (route == null) return;
+
+    setState(() {
+      _selectedRoute = route;
+      _routePoints = [];
+    });
+
+    try {
+      final response = await _supabase
+          .from('stops')
+          .select()
+          .eq('route_id', route.id)
+          .order('stop_order', ascending: true);
+
+      final stops = (response as List).map((data) => BusStop.fromMap(data)).toList();
+
+      if (stops.isNotEmpty) {
+        setState(() {
+          _routePoints = stops.map((s) => LatLng(s.latitude, s.longitude)).toList();
+        });
+        _mapController.move(_routePoints.first, 13.0);
+      }
+    } catch (e) {
+      AppLogger.error('Failed to load stops', tag: 'BUS_MAP', error: e);
+    }
+  }
+
+  void _listenToBusLocations() {
+    _supabase
+        .from('bus_locations')
+        .stream(primaryKey: ['id'])
+        .listen((data) {
+      if (mounted) {
+        final locations = data.map((map) => BusLocation.fromMap(map)).toList();
+        setState(() {
+          _activeBuses = locations;
+        });
+      }
+    });
+  }
+
+  void _listenToAlerts() {
+    _supabase
+        .from('alerts')
+        .stream(primaryKey: ['id'])
+        .order('timestamp', ascending: false)
+        .limit(5)
+        .listen((data) {
+      if (mounted) {
+        List<Map<String, dynamic>> relevantAlerts = data;
+
+        // STRICT FILTERING LOGIC
+        if (widget.userType == 'student') {
+          if (_myActiveBusId == null || _myActiveBusId!.isEmpty) {
+            // Scenario: Student has NO ticket.
+            // Force empty list so NO alerts are shown.
+            relevantAlerts = [];
+          } else {
+            // Scenario: Student HAS ticket.
+            // Only allow alerts where bus_id matches the ticket's bus_id.
+            relevantAlerts = data.where((alert) {
+              return alert['bus_id'] == _myActiveBusId;
+            }).toList();
+          }
+        }
+
+        // Check for new alerts to show popup
+        bool isNewAlert = false;
+        if (relevantAlerts.isNotEmpty) {
+          if (_activeAlerts.isEmpty) {
+            // Check if it's recent (last 30 seconds)
+            final alertTime = DateTime.parse(relevantAlerts.first['timestamp']);
+            if (DateTime.now().difference(alertTime).inSeconds < 30) {
+              isNewAlert = true;
+            }
+          } else if (relevantAlerts.first['id'] != _activeAlerts.first['id']) {
+            isNewAlert = true;
+          }
+        }
+
+        setState(() {
+          _activeAlerts = relevantAlerts;
+        });
+
+        if (isNewAlert) {
+          final newAlert = relevantAlerts.first;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("⚠️ Bus ${newAlert['bus_id']}: ${newAlert['alert_type']}"),
+              backgroundColor: Colors.redAccent,
+              duration: const Duration(seconds: 6),
+              action: SnackBarAction(label: 'VIEW', textColor: Colors.white, onPressed: _showAlertsDialog),
+            ),
+          );
+        }
+      }
+    });
+  }
+
+  void _showAlertsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.red),
+            SizedBox(width: 8),
+            Text("My Bus Alerts"),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: _activeAlerts.isEmpty
+              ? const Text("No active alerts for your bus.")
+              : ListView.builder(
+            shrinkWrap: true,
+            itemCount: _activeAlerts.length,
+            itemBuilder: (context, index) {
+              final alert = _activeAlerts[index];
+              final time = DateTime.parse(alert['timestamp']);
+              final timeStr = DateFormat('h:mm a').format(time);
+
+              return ListTile(
+                leading: const Icon(Icons.info_outline, color: Colors.orange),
+                title: Text(alert['alert_type'] ?? 'Alert'),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(alert['message'] ?? ''),
+                    Text("$timeStr", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("CLOSE")),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // Map
+        // Map Layer
         FlutterMap(
           mapController: _mapController,
           options: MapOptions(
-            initialCenter: _currentPosition != null
-                ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
-                : const LatLng(23.7500, 90.3615), // ULAB coordinates
-            initialZoom: 15.0,
-            maxZoom: 18.0,
-            minZoom: 10.0,
+            initialCenter: _ulabLocation,
+            initialZoom: 13.0,
           ),
           children: [
             TileLayer(
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.ulab.bus.system',
             ),
-
-            // Current Location Marker
-            if (_currentPosition != null)
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    width: 40.0,
-                    height: 40.0,
-                    point: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-                    child: const Icon(
-                      Icons.location_pin,
-                      color: Colors.blue,
-                      size: 40.0,
-                    ),
-                  ),
+            if (_routePoints.isNotEmpty)
+              PolylineLayer(
+                polylines: [
+                  Polyline(points: _routePoints, strokeWidth: 5.0, color: Colors.blueAccent),
                 ],
               ),
-
-            // Bus Location Markers
+            if (_routePoints.isNotEmpty)
+              MarkerLayer(
+                markers: _routePoints.map((point) => Marker(
+                  point: point, width: 12, height: 12,
+                  child: Container(decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle)),
+                )).toList(),
+              ),
             MarkerLayer(
-              markers: _busLocations.map((location) {
-                return Marker(
-                  width: 30.0,
-                  height: 30.0,
-                  point: LatLng(location.latitude, location.longitude),
-                  child: const Icon(
-                    Icons.directions_bus,
-                    color: Colors.red,
-                    size: 30.0,
-                  ),
-                );
-              }).toList(),
+              markers: _activeBuses.map((bus) => Marker(
+                point: LatLng(bus.latitude, bus.longitude), width: 40, height: 40,
+                child: const Icon(Icons.directions_bus, color: Colors.red, size: 40),
+              )).toList(),
             ),
-
-            // ULAB Campus Marker
             MarkerLayer(
               markers: [
                 Marker(
-                  width: 30.0,
-                  height: 30.0,
-                  point: const LatLng(23.7500, 90.3615),
-                  child: const Icon(
-                    Icons.school,
-                    color: Colors.green,
-                    size: 30.0,
-                  ),
+                  point: _ulabLocation, width: 45, height: 45,
+                  child: const Column(children: [Icon(Icons.school, color: Colors.green, size: 30), Text("ULAB", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10))]),
                 ),
               ],
             ),
           ],
         ),
 
-        // Driver Controls
-        if (widget.userType == 'driver') _buildDriverControls(),
-
-        // Student Controls
-        if (widget.userType == 'student') _buildStudentControls(),
-
-        // Location Update Button
+        // Route Selector
         Positioned(
-          bottom: widget.userType == 'student' ? 100 : 16,
-          right: 16,
-          child: FloatingActionButton(
-            onPressed: _updateMyLocation,
-            mini: true,
-            backgroundColor: Colors.blue,
-            foregroundColor: Colors.white,
-            child: const Icon(Icons.my_location),
+          top: 50, left: 16, right: 70,
+          child: Card(
+            elevation: 4,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: _isLoadingRoutes
+                  ? const LinearProgressIndicator()
+                  : DropdownButtonHideUnderline(
+                child: DropdownButton<BusRoute>(
+                  isExpanded: true,
+                  hint: const Text("Select a Route"),
+                  value: _selectedRoute,
+                  items: _routes.map((route) => DropdownMenuItem(value: route, child: Text(route.name, overflow: TextOverflow.ellipsis))).toList(),
+                  onChanged: _onRouteSelected,
+                ),
+              ),
+            ),
           ),
         ),
 
-        // Loading Indicator
-        if (_isLoading)
-          const Center(
-            child: CircularProgressIndicator(),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildDriverControls() {
-    return Positioned(
-      top: 16,
-      left: 16,
-      right: 16,
-      child: Card(
-        elevation: 8,
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    widget.isTripActive == true
-                        ? Icons.play_circle_fill
-                        : Icons.pause_circle_filled,
-                    color: widget.isTripActive == true ? Colors.green : Colors.grey,
-                    size: 40,
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.isTripActive == true ? 'Trip Active' : 'Trip Inactive',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Text(
-                          'Bus ${widget.busNumber}',
-                          style: TextStyle(
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        if (_currentPosition != null)
-                          Text(
-                            'Location: ${_currentPosition!.latitude.toStringAsFixed(4)}, ${_currentPosition!.longitude.toStringAsFixed(4)}',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  Column(
-                    children: [
-                      ElevatedButton(
-                        onPressed: () {
-                          final newStatus = !(widget.isTripActive == true);
-                          widget.onTripStatusChanged?.call(newStatus);
-
-                          if (newStatus) {
-                            _startLocationTracking();
-                          } else {
-                            _stopLocationTracking();
-                          }
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: widget.isTripActive == true ? Colors.red : Colors.green,
-                          foregroundColor: Colors.white,
-                        ),
-                        child: Text(widget.isTripActive == true ? 'END TRIP' : 'START TRIP'),
-                      ),
-                      const SizedBox(height: 8),
-                      ElevatedButton(
-                        onPressed: _updateMyLocation,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue,
-                          foregroundColor: Colors.white,
-                        ),
-                        child: const Text('UPDATE LOCATION'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              if (_isTrackingLocation)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8.0),
-                  child: Text(
-                    'Location tracking active',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                    ),
+        // Alert Icon (Only visible if there are alerts for MY bus)
+        if (_activeAlerts.isNotEmpty)
+          Positioned(
+            top: 50, right: 16,
+            child: Stack(
+              children: [
+                FloatingActionButton(
+                  heroTag: "alerts", backgroundColor: Colors.white, onPressed: _showAlertsDialog, mini: true,
+                  child: const Icon(Icons.notifications, color: Colors.orange),
+                ),
+                Positioned(
+                  right: 0, top: 0,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                    constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    child: Text('${_activeAlerts.length}', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
                   ),
                 ),
-            ],
+              ],
+            ),
+          ),
+
+        // Recenter Button
+        Positioned(
+          bottom: 100, right: 16,
+          child: FloatingActionButton(
+            heroTag: "recenter", mini: true, backgroundColor: Colors.white,
+            onPressed: () { _mapController.move(_ulabLocation, 13.0); },
+            child: const Icon(Icons.my_location, color: Colors.blue),
           ),
         ),
-      ),
-    );
-  }
 
-  Widget _buildStudentControls() {
-    return Positioned(
-      bottom: 16,
-      right: 16,
-      child: Column(
-        children: [
-          FloatingActionButton(
-            onPressed: widget.onBookTicket,
-            backgroundColor: Colors.green,
-            foregroundColor: Colors.white,
-            child: const Icon(Icons.confirmation_number),
+        // Book Ticket Button (Fixed Logic)
+        if (widget.userType == 'student')
+          Positioned(
+            bottom: 20, left: 50, right: 50,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green, foregroundColor: Colors.white, padding: const EdgeInsets.all(16),
+              ),
+              onPressed: () {
+                // Correctly call the VoidCallback without await
+                widget.onBookTicket?.call();
+              },
+              icon: const Icon(Icons.confirmation_number),
+              label: const Text("BOOK TICKET"),
+            ),
           ),
-          const SizedBox(height: 16),
-          FloatingActionButton(
-            onPressed: () {
-              if (_currentPosition != null) {
-                _mapController.move(
-                  LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-                  15.0,
-                );
-              } else {
-                _mapController.move(const LatLng(23.7500, 90.3615), 15.0);
-              }
-            },
-            mini: true,
-            backgroundColor: Colors.blue,
-            foregroundColor: Colors.white,
-            child: const Icon(Icons.my_location),
-          ),
-        ],
-      ),
+      ],
     );
   }
 }

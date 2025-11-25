@@ -153,7 +153,7 @@ class SupabaseService {
     try {
       AppLogger.debug('Fetching routes', tag: 'SUPABASE');
       final response = await _client
-          .from('routes')
+          .from('bus_routes') // <--- FIXED
           .select()
           .eq('is_active', true);
 
@@ -161,10 +161,8 @@ class SupabaseService {
         final routes = response
             .map((item) => BusRoute.fromMap(item as Map<String, dynamic>))
             .toList();
-        AppLogger.debug('Found ${routes.length} routes', tag: 'SUPABASE');
         return routes;
       }
-      AppLogger.debug('No routes found', tag: 'SUPABASE');
       return [];
     } catch (e) {
       AppLogger.error('Failed to get routes', tag: 'SUPABASE', error: e);
