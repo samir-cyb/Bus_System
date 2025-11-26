@@ -2,10 +2,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:geolocator/geolocator.dart'; // Added import
 import 'package:ulab_bus/core/logger.dart';
 import 'package:ulab_bus/core/models.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import 'package:ulab_bus/services/location_service.dart'; // Added import
 
 class BusMap extends StatefulWidget {
   final String userType;
@@ -33,12 +35,17 @@ class _BusMapState extends State<BusMap> {
   List<LatLng> _routePoints = [];
   List<BusLocation> _activeBuses = [];
 
+  // User Location (The Blue Dot)
+  Position? _myLocation;
+
+  // Alert & Ticket Logic
   List<Map<String, dynamic>> _rawAlerts = [];
   List<Map<String, dynamic>> _visibleAlerts = [];
   String? _myActiveBusId;
 
   StreamSubscription? _ticketSubscription;
   StreamSubscription? _alertSubscription;
+  StreamSubscription? _myLocationSubscription;
 
   bool _isLoadingRoutes = true;
   final LatLng _ulabLocation = const LatLng(23.7629, 90.3582);
@@ -48,6 +55,7 @@ class _BusMapState extends State<BusMap> {
     super.initState();
     _loadRoutes();
     _listenToBusLocations();
+    _listenToMyLocation(); // Start tracking student location
 
     if (widget.userType == 'student') {
       _listenToMyActiveTicket();
@@ -59,7 +67,19 @@ class _BusMapState extends State<BusMap> {
   void dispose() {
     _ticketSubscription?.cancel();
     _alertSubscription?.cancel();
+    _myLocationSubscription?.cancel();
     super.dispose();
+  }
+
+  // 0. LISTEN TO MY LOCATION (Blue Dot)
+  void _listenToMyLocation() {
+    _myLocationSubscription = LocationService().getStudentLocationStream().listen((pos) {
+      if (mounted) {
+        setState(() {
+          _myLocation = pos;
+        });
+      }
+    });
   }
 
   // 1. TICKET LISTENER
@@ -74,18 +94,14 @@ class _BusMapState extends State<BusMap> {
       String? foundBusId;
       if (data.isNotEmpty) {
         final ticket = data.first;
-        // Check if ticket is valid (Not used)
-        // REMOVED TIME CHECK FOR DEBUGGING to ensure ticket is found
-        if (ticket['is_used'] == false) {
-          foundBusId = ticket['bus_id'];
-          print("DEBUG: Active Ticket Found: $foundBusId");
-        } else {
-          print("DEBUG: Ticket found but it is USED.");
-        }
-      } else {
-        print("DEBUG: No tickets in database for this student.");
-      }
+        final isUsed = ticket['is_used'] == true;
+        final purchaseTime = DateTime.parse(ticket['purchase_time']).toLocal();
+        final isRecent = DateTime.now().difference(purchaseTime).inHours < 24;
 
+        if (!isUsed && isRecent) {
+          foundBusId = ticket['bus_id'];
+        }
+      }
       if (mounted) {
         setState(() { _myActiveBusId = foundBusId; });
         _filterAlerts();
@@ -102,40 +118,26 @@ class _BusMapState extends State<BusMap> {
         .limit(5)
         .listen((data) {
       if (mounted) {
-        print("DEBUG: Alert Stream Received ${data.length} items.");
-
-        bool isNew = false;
-        if (data.isNotEmpty) {
-          // If we have no previous alerts, or the top ID changed
-          if (_rawAlerts.isEmpty || data.first['id'] != _rawAlerts.first['id']) {
-            print("DEBUG: NEW Alert detected: ${data.first['alert_type']}");
-            isNew = true;
-          }
+        bool isNewAlertIncoming = false;
+        if (_rawAlerts.isNotEmpty && data.isNotEmpty) {
+          if (data.first['id'] != _rawAlerts.first['id']) isNewAlertIncoming = true;
+        } else if (_rawAlerts.isEmpty && data.isNotEmpty) {
+          isNewAlertIncoming = true;
         }
-
         setState(() { _rawAlerts = data; });
-
-        // Pass 'true' to attempt showing popup
-        _filterAlerts(attemptPopup: isNew);
+        _filterAlerts(checkTime: isNewAlertIncoming);
       }
     });
   }
 
   // 3. FILTER LOGIC
-  void _filterAlerts({bool attemptPopup = false}) {
+  void _filterAlerts({bool checkTime = false}) {
     List<Map<String, dynamic>> filtered = [];
-
     if (widget.userType == 'student') {
       if (_myActiveBusId == null) {
-        print("DEBUG: Hiding alerts because _myActiveBusId is NULL");
         filtered = [];
       } else {
-        filtered = _rawAlerts.where((alert) {
-          // Debug matching
-          bool match = alert['bus_id'] == _myActiveBusId;
-          if (!match) print("DEBUG: Alert bus '${alert['bus_id']}' != My Bus '$_myActiveBusId'");
-          return match;
-        }).toList();
+        filtered = _rawAlerts.where((alert) => alert['bus_id'] == _myActiveBusId).toList();
       }
     } else {
       filtered = _rawAlerts;
@@ -143,18 +145,13 @@ class _BusMapState extends State<BusMap> {
 
     setState(() { _visibleAlerts = filtered; });
 
-    if (attemptPopup && filtered.isNotEmpty) {
-      print("DEBUG: Attempting to show Popup...");
+    if (checkTime && filtered.isNotEmpty) {
       final latestAlert = filtered.first;
-
-      // REMOVED TIME CHECK TEMPORARILY
-      // This was likely the cause of failure if device clocks differ
-
-      if (_rawAlerts.isNotEmpty && latestAlert['id'] == _rawAlerts.first['id']) {
-        print("DEBUG: Showing SnackBar NOW!");
-        _showSnackBar(latestAlert);
-      } else {
-        print("DEBUG: Alert matched bus, but was not the newest in raw list?");
+      final alertTime = DateTime.parse(latestAlert['timestamp']).toLocal();
+      if (DateTime.now().difference(alertTime).inMinutes < 5) {
+        if (_rawAlerts.isNotEmpty && latestAlert['id'] == _rawAlerts.first['id']) {
+          _showSnackBar(latestAlert);
+        }
       }
     }
   }
@@ -167,23 +164,17 @@ class _BusMapState extends State<BusMap> {
           children: [
             const Icon(Icons.warning_amber_rounded, color: Colors.white),
             const SizedBox(width: 10),
-            Expanded(
-              child: Text("${alert['alert_type']}: ${alert['message']}",
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
+            Expanded(child: Text("${alert['alert_type']}: ${alert['message']}", style: const TextStyle(fontWeight: FontWeight.bold))),
           ],
         ),
         backgroundColor: Colors.red[700],
-        duration: const Duration(seconds: 10),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.all(16),
+        duration: const Duration(seconds: 6),
         action: SnackBarAction(label: 'VIEW', textColor: Colors.white, onPressed: _showAlertsDialog),
       ),
     );
   }
 
-  // --- STANDARD MAP UI ---
+  // --- MAP UI ---
 
   Future<void> _loadRoutes() async {
     try {
@@ -212,16 +203,11 @@ class _BusMapState extends State<BusMap> {
     _supabase.from('bus_locations').stream(primaryKey: ['id']).listen((data) {
       if (mounted) {
         final now = DateTime.now();
-
-        // Filter logic: Only show buses updated in last 5 minutes
         final validLocations = data.where((loc) {
-          final locTime = DateTime.parse(loc['timestamp']); // Assuming timestamp exists in JSON
+          final locTime = DateTime.parse(loc['timestamp']);
           return now.difference(locTime).inMinutes < 5;
         }).map((map) => BusLocation.fromMap(map)).toList();
-
-        setState(() {
-          _activeBuses = validLocations;
-        });
+        setState(() => _activeBuses = validLocations);
       }
     });
   }
@@ -263,6 +249,26 @@ class _BusMapState extends State<BusMap> {
           options: MapOptions(initialCenter: _ulabLocation, initialZoom: 13.0),
           children: [
             TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'com.ulab.bus.system'),
+
+            // Student Location (Blue Dot)
+            if (_myLocation != null)
+              MarkerLayer(
+                markers: [
+                  Marker(
+                    point: LatLng(_myLocation!.latitude, _myLocation!.longitude),
+                    width: 20, height: 20,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.blue,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
             if (_routePoints.isNotEmpty) PolylineLayer(polylines: [Polyline(points: _routePoints, strokeWidth: 5.0, color: Colors.blueAccent)]),
             if (_routePoints.isNotEmpty) MarkerLayer(markers: _routePoints.map((point) => Marker(point: point, width: 12, height: 12, child: Container(decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle)))).toList()),
             MarkerLayer(markers: _activeBuses.map((bus) => Marker(point: LatLng(bus.latitude, bus.longitude), width: 40, height: 40, child: const Icon(Icons.directions_bus, color: Colors.red, size: 40))).toList()),
@@ -284,7 +290,7 @@ class _BusMapState extends State<BusMap> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(_myActiveBusId != null ? Icons.confirmation_number_outlined : Icons.confirmation_number_outlined, color: Colors.white, size: 16),
+                  Icon(_myActiveBusId != null ? Icons.confirmation_number : Icons.confirmation_number_outlined, color: Colors.white, size: 16),
                   const SizedBox(width: 8),
                   Text(
                     _myActiveBusId != null ? "Tracking Bus: $_myActiveBusId" : "No Active Ticket",
@@ -341,11 +347,18 @@ class _BusMapState extends State<BusMap> {
             ),
           ),
 
+        // Recenter & My Location Button
         Positioned(
           bottom: 100, right: 16,
           child: FloatingActionButton(
             heroTag: "recenter", mini: true, backgroundColor: Colors.white,
-            onPressed: () { _mapController.move(_ulabLocation, 13.0); },
+            onPressed: () {
+              if (_myLocation != null) {
+                _mapController.move(LatLng(_myLocation!.latitude, _myLocation!.longitude), 15.0);
+              } else {
+                _mapController.move(_ulabLocation, 13.0);
+              }
+            },
             child: const Icon(Icons.my_location, color: Colors.blue),
           ),
         ),

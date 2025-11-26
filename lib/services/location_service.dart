@@ -1,5 +1,6 @@
+import 'dart:async'; // Required for StreamSubscription
 import 'package:geolocator/geolocator.dart';
-import 'package:supabase_flutter/supabase_flutter.dart'; // Added this import
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ulab_bus/core/logger.dart';
 import 'package:ulab_bus/core/models.dart';
 import 'package:ulab_bus/services/supabase_service.dart';
@@ -11,7 +12,10 @@ class LocationService {
 
   bool _isTracking = false;
   Position? _lastPosition;
-  Stream<Position>? _positionStream;
+
+  // FIX: Store the Subscription so we can cancel it later
+  StreamSubscription<Position>? _positionStreamSubscription;
+
   String? _currentBusId;
   String? _currentDriverId;
 
@@ -47,37 +51,56 @@ class LocationService {
     }
   }
 
+  // Helper for Student App
+  Stream<Position> getStudentLocationStream() {
+    const LocationSettings locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5,
+    );
+    return Geolocator.getPositionStream(locationSettings: locationSettings);
+  }
+
   Future<Position?> getCurrentLocation() async {
     try {
       Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.best,
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 5),
       );
       _lastPosition = position;
       return position;
     } catch (e) {
       AppLogger.error('Failed to get current location', tag: 'LOCATION', error: e);
-      return null;
+      return _lastPosition;
     }
   }
 
-  void startLocationTracking(String busId, String driverId, Function(BusLocation) onLocationUpdate) {
-    if (_isTracking) return;
+  // FIX: Changed to async to allow proper cancellation
+  void startLocationTracking(String busId, String driverId, Function(BusLocation) onLocationUpdate) async {
+    if (_isTracking) {
+      AppLogger.warning('Location tracking already started', tag: 'LOCATION');
+      return;
+    }
 
     AppLogger.info('Starting tracking for bus: $busId', tag: 'LOCATION');
+
+    // Safety: Ensure any previous stream is killed
+    await _positionStreamSubscription?.cancel();
+
     _isTracking = true;
     _currentBusId = busId;
     _currentDriverId = driverId;
 
     const LocationSettings locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
+      accuracy: LocationAccuracy.high,
       distanceFilter: 10,
     );
 
-    _positionStream = Geolocator.getPositionStream(locationSettings: locationSettings);
-    _positionStream?.listen((Position position) async {
-      // 1. Create Location Object
+    // FIX: Assign the subscription to the variable
+    _positionStreamSubscription = Geolocator.getPositionStream(locationSettings: locationSettings)
+        .listen((Position position) async {
+
       final busLocation = BusLocation(
-        id: busId, // USE BUS ID AS KEY so we don't create duplicates
+        id: busId,
         busId: busId,
         driverId: driverId,
         latitude: position.latitude,
@@ -87,16 +110,17 @@ class LocationService {
         heading: position.heading,
       );
 
-      // 2. Local Update
+      // Update local state
       onLocationUpdate(busLocation);
       _lastPosition = position;
 
-      // 3. Database Update
+      // Send to Supabase
       await SupabaseService().updateBusLocation(busLocation);
     });
+
+    AppLogger.success('Location tracking started', tag: 'LOCATION');
   }
 
-  // NEW: Deletes the location from database so the bus disappears from map
   Future<void> clearBusLocation(String busId) async {
     try {
       await Supabase.instance.client
@@ -109,18 +133,25 @@ class LocationService {
     }
   }
 
-  void stopLocationTracking() {
+  // FIX: Changed to Future<void> to allow await
+  Future<void> stopLocationTracking() async {
     if (_currentBusId != null) {
-      clearBusLocation(_currentBusId!); // Clean up database
+      await clearBusLocation(_currentBusId!);
     }
 
     AppLogger.info('Stopping location tracking...', tag: 'LOCATION');
+
+    // FIX: Actually cancel the listener
+    await _positionStreamSubscription?.cancel();
+    _positionStreamSubscription = null;
+
     _isTracking = false;
-    _positionStream = null;
     _currentBusId = null;
     _currentDriverId = null;
+    AppLogger.success('Location tracking stopped', tag: 'LOCATION');
   }
 
   bool get isTracking => _isTracking;
   Position? get lastPosition => _lastPosition;
+  String? get currentBusId => _currentBusId;
 }
