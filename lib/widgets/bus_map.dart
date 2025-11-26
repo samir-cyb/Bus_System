@@ -211,8 +211,17 @@ class _BusMapState extends State<BusMap> {
   void _listenToBusLocations() {
     _supabase.from('bus_locations').stream(primaryKey: ['id']).listen((data) {
       if (mounted) {
-        final locations = data.map((map) => BusLocation.fromMap(map)).toList();
-        setState(() => _activeBuses = locations);
+        final now = DateTime.now();
+
+        // Filter logic: Only show buses updated in last 5 minutes
+        final validLocations = data.where((loc) {
+          final locTime = DateTime.parse(loc['timestamp']); // Assuming timestamp exists in JSON
+          return now.difference(locTime).inMinutes < 5;
+        }).map((map) => BusLocation.fromMap(map)).toList();
+
+        setState(() {
+          _activeBuses = validLocations;
+        });
       }
     });
   }

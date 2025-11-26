@@ -6,8 +6,6 @@ import 'package:ulab_bus/screens/ticket_history_screen.dart';
 import 'package:ulab_bus/widgets/bus_map.dart';
 import 'package:ulab_bus/services/location_service.dart';
 
-import 'debug_screen.dart';
-
 class StudentDashboard extends StatefulWidget {
   final String studentId;
   final String studentName;
@@ -36,7 +34,11 @@ class _StudentDashboardState extends State<StudentDashboard> {
   Future<void> _initializeDashboard() async {
     final locationService = LocationService();
     final enabled = await locationService.initializeLocationService();
-    if(mounted) setState(() => _locationEnabled = enabled);
+    if (mounted) {
+      setState(() {
+        _locationEnabled = enabled;
+      });
+    }
   }
 
   void _logout() {
@@ -44,15 +46,16 @@ class _StudentDashboardState extends State<StudentDashboard> {
     Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
   }
 
-  // Add this method to fix the error
+  // Helper to refresh UI when returning from booking
   void _refreshTickets() {
-    // Since we use StreamBuilder, data updates automatically.
-    // We just call setState to ensure the UI catches up if needed.
     if (mounted) {
       setState(() {});
     }
   }
 
+  // ==================================================
+  // TAB 1: HOME
+  // ==================================================
   Widget _buildHomeTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16.0),
@@ -67,25 +70,40 @@ class _StudentDashboardState extends State<StudentDashboard> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Welcome, ${widget.studentName}!',
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.green),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text('ULAB Bus System', style: TextStyle(color: Colors.grey)),
-                    ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Welcome, ${widget.studentName}!',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.green,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'ULAB Bus System',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
                   ),
-                  const CircleAvatar(backgroundColor: Colors.green, child: Icon(Icons.person, color: Colors.white)),
+                  const CircleAvatar(
+                    backgroundColor: Colors.green,
+                    child: Icon(Icons.person, color: Colors.white),
+                  ),
                 ],
               ),
             ),
           ),
 
           const SizedBox(height: 20),
-          const Text('Quick Actions', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text(
+            'Quick Actions',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
 
           Row(
@@ -97,7 +115,7 @@ class _StudentDashboardState extends State<StudentDashboard> {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => TicketBookingScreen( // <--- Change this back from DebugScreen
+                          builder: (context) => TicketBookingScreen(
                             studentId: widget.studentId,
                             studentName: widget.studentName,
                           ),
@@ -117,10 +135,15 @@ class _StudentDashboardState extends State<StudentDashboard> {
                   ),
                 ),
               ),
+              const SizedBox(width: 16),
               Expanded(
                 child: Card(
                   child: InkWell(
-                    onTap: () => setState(() => _currentIndex = 1),
+                    onTap: () {
+                      setState(() {
+                        _currentIndex = 1; // Switch to Map tab
+                      });
+                    },
                     child: const Padding(
                       padding: EdgeInsets.all(16.0),
                       child: Column(
@@ -138,7 +161,10 @@ class _StudentDashboardState extends State<StudentDashboard> {
           ),
 
           const SizedBox(height: 20),
-          const Text('Recent Tickets', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text(
+            'Recent Tickets',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
 
           // REAL-TIME STREAM FOR RECENT TICKETS
@@ -148,20 +174,32 @@ class _StudentDashboardState extends State<StudentDashboard> {
                 .stream(primaryKey: ['id'])
                 .eq('student_id', widget.studentId)
                 .order('purchase_time', ascending: false)
-                .limit(3),
+                .limit(5), // Fetch slightly more to handle hidden ones
             builder: (context, snapshot) {
-              if (snapshot.hasError) return Text('Error: ${snapshot.error}');
-              if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+              if (snapshot.hasError) {
+                return Text('Error: ${snapshot.error}');
+              }
+              if (!snapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
 
               final tickets = snapshot.data!;
-              // Filter out hidden tickets
-              final visibleTickets = tickets.where((t) => t['is_hidden_by_student'] != true).toList();
+              // Filter out tickets hidden by user
+              final visibleTickets = tickets.where((t) => t['is_hidden_by_student'] != true).take(3).toList();
 
               if (visibleTickets.isEmpty) {
                 return const Card(
                   child: Padding(
                     padding: EdgeInsets.all(20.0),
-                    child: Center(child: Text("No recent tickets")),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          Icon(Icons.airplane_ticket_outlined, size: 48, color: Colors.grey),
+                          SizedBox(height: 8),
+                          Text("No recent tickets", style: TextStyle(color: Colors.grey)),
+                        ],
+                      ),
+                    ),
                   ),
                 );
               }
@@ -182,6 +220,11 @@ class _StudentDashboardState extends State<StudentDashboard> {
                       trailing: Chip(
                         label: Text(isUsed ? 'USED' : 'ACTIVE'),
                         backgroundColor: isUsed ? Colors.grey[300] : Colors.green[100],
+                        labelStyle: TextStyle(
+                          color: isUsed ? Colors.grey[800] : Colors.green[900],
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
                       ),
                     ),
                   );
@@ -197,7 +240,9 @@ class _StudentDashboardState extends State<StudentDashboard> {
               onPressed: () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => TicketHistoryScreen(studentId: widget.studentId)),
+                  MaterialPageRoute(
+                    builder: (context) => TicketHistoryScreen(studentId: widget.studentId),
+                  ),
                 );
               },
               child: const Text('VIEW ALL TICKETS'),
@@ -208,6 +253,9 @@ class _StudentDashboardState extends State<StudentDashboard> {
     );
   }
 
+  // ==================================================
+  // TAB 2: MAP
+  // ==================================================
   Widget _buildMapTab() {
     return BusMap(
       userType: 'student',
@@ -215,11 +263,119 @@ class _StudentDashboardState extends State<StudentDashboard> {
       onBookTicket: () {
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (context) => TicketBookingScreen(
-              studentId: widget.studentId, studentName: widget.studentName)
+          MaterialPageRoute(
+            builder: (context) => TicketBookingScreen(
+              studentId: widget.studentId,
+              studentName: widget.studentName,
+            ),
           ),
         );
       },
+    );
+  }
+
+  // ==================================================
+  // TAB 3: PROFILE
+  // ==================================================
+  Widget _buildProfileTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+          const SizedBox(height: 20),
+          CircleAvatar(
+            radius: 60,
+            backgroundColor: Colors.green[100],
+            child: Text(
+              widget.studentName.isNotEmpty ? widget.studentName[0].toUpperCase() : "S",
+              style: const TextStyle(
+                fontSize: 50,
+                color: Colors.green,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            widget.studentName,
+            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.blue[100],
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              "Student",
+              style: TextStyle(color: Colors.blue[800], fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(height: 40),
+
+          // Details Card
+          Card(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.badge, color: Colors.blue),
+                  title: const Text("Student ID"),
+                  subtitle: Text(widget.studentId),
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.history, color: Colors.orange),
+                  title: const Text("Ticket History"),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => TicketHistoryScreen(studentId: widget.studentId),
+                      ),
+                    );
+                  },
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.help, color: Colors.purple),
+                  title: const Text("Help & Support"),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: () {
+                    showDialog(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: const Text("Help"),
+                        content: const Text("For support, contact the transport office at ULAB Campus A."),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(context), child: const Text("OK"))
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 30),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.logout),
+              label: const Text("LOGOUT"),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.red,
+                side: const BorderSide(color: Colors.red),
+              ),
+              onPressed: _logout,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -231,7 +387,6 @@ class _StudentDashboardState extends State<StudentDashboard> {
         backgroundColor: Colors.green,
         foregroundColor: Colors.white,
         actions: [
-          // LOGOUT BUTTON
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: "Logout",
@@ -244,16 +399,29 @@ class _StudentDashboardState extends State<StudentDashboard> {
         children: [
           _buildHomeTab(),
           _buildMapTab(),
-          const Center(child: Text("Profile Tab Placeholder")), // You can reuse your profile tab code here
+          _buildProfileTab(),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
+        onTap: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Live Map'),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.map),
+            label: 'Live Map',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person),
+            label: 'Profile',
+          ),
         ],
       ),
     );

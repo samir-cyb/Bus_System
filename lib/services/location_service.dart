@@ -1,4 +1,5 @@
 import 'package:geolocator/geolocator.dart';
+import 'package:supabase_flutter/supabase_flutter.dart'; // Added this import
 import 'package:ulab_bus/core/logger.dart';
 import 'package:ulab_bus/core/models.dart';
 import 'package:ulab_bus/services/supabase_service.dart';
@@ -18,7 +19,6 @@ class LocationService {
     try {
       AppLogger.info('Initializing location service...', tag: 'LOCATION');
 
-      // Check permissions
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -33,7 +33,6 @@ class LocationService {
         return false;
       }
 
-      // Check if location service is enabled
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
         AppLogger.warning('Location services are disabled', tag: 'LOCATION');
@@ -50,12 +49,10 @@ class LocationService {
 
   Future<Position?> getCurrentLocation() async {
     try {
-      AppLogger.debug('Getting current location...', tag: 'LOCATION');
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.best,
       );
       _lastPosition = position;
-      AppLogger.debug('Location acquired: ${position.latitude}, ${position.longitude}', tag: 'LOCATION');
       return position;
     } catch (e) {
       AppLogger.error('Failed to get current location', tag: 'LOCATION', error: e);
@@ -64,27 +61,23 @@ class LocationService {
   }
 
   void startLocationTracking(String busId, String driverId, Function(BusLocation) onLocationUpdate) {
-    if (_isTracking) {
-      AppLogger.warning('Location tracking already started', tag: 'LOCATION');
-      return;
-    }
+    if (_isTracking) return;
 
-    AppLogger.info('Starting location tracking for bus: $busId', tag: 'LOCATION');
+    AppLogger.info('Starting tracking for bus: $busId', tag: 'LOCATION');
     _isTracking = true;
     _currentBusId = busId;
     _currentDriverId = driverId;
 
     const LocationSettings locationSettings = LocationSettings(
       accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 10, // meters
+      distanceFilter: 10,
     );
 
     _positionStream = Geolocator.getPositionStream(locationSettings: locationSettings);
     _positionStream?.listen((Position position) async {
-      AppLogger.debug('Location update: ${position.latitude}, ${position.longitude}', tag: 'LOCATION');
-
+      // 1. Create Location Object
       final busLocation = BusLocation(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        id: busId, // USE BUS ID AS KEY so we don't create duplicates
         busId: busId,
         driverId: driverId,
         latitude: position.latitude,
@@ -94,27 +87,40 @@ class LocationService {
         heading: position.heading,
       );
 
-      // Update local state
+      // 2. Local Update
       onLocationUpdate(busLocation);
       _lastPosition = position;
 
-      // Send to Supabase for real-time sharing
+      // 3. Database Update
       await SupabaseService().updateBusLocation(busLocation);
     });
+  }
 
-    AppLogger.success('Location tracking started', tag: 'LOCATION');
+  // NEW: Deletes the location from database so the bus disappears from map
+  Future<void> clearBusLocation(String busId) async {
+    try {
+      await Supabase.instance.client
+          .from('bus_locations')
+          .delete()
+          .eq('bus_id', busId);
+      AppLogger.success('Cleared location for bus: $busId', tag: 'LOCATION');
+    } catch (e) {
+      AppLogger.error('Failed to clear location', tag: 'LOCATION', error: e);
+    }
   }
 
   void stopLocationTracking() {
+    if (_currentBusId != null) {
+      clearBusLocation(_currentBusId!); // Clean up database
+    }
+
     AppLogger.info('Stopping location tracking...', tag: 'LOCATION');
     _isTracking = false;
     _positionStream = null;
     _currentBusId = null;
     _currentDriverId = null;
-    AppLogger.success('Location tracking stopped', tag: 'LOCATION');
   }
 
   bool get isTracking => _isTracking;
   Position? get lastPosition => _lastPosition;
-  String? get currentBusId => _currentBusId;
 }
