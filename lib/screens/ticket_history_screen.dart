@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:ulab_bus/core/logger.dart';
-import 'package:ulab_bus/core/models.dart';
-import 'package:ulab_bus/services/supabase_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:intl/intl.dart';
 
 class TicketHistoryScreen extends StatefulWidget {
   final String studentId;
-
   const TicketHistoryScreen({super.key, required this.studentId});
 
   @override
@@ -13,36 +11,38 @@ class TicketHistoryScreen extends StatefulWidget {
 }
 
 class _TicketHistoryScreenState extends State<TicketHistoryScreen> {
-  List<Ticket> _tickets = [];
-  bool _isLoading = true;
-  String _errorMessage = '';
+  final _supabase = Supabase.instance.client;
 
-  @override
-  void initState() {
-    super.initState();
-    _loadTickets();
-  }
-
-  Future<void> _loadTickets() async {
+  Future<void> _hideTicket(String ticketId) async {
     try {
-      final tickets = await SupabaseService().getStudentTickets(widget.studentId);
-      setState(() {
-        _tickets = tickets;
-        _isLoading = false;
-      });
+      await _supabase.from('tickets').update({'is_hidden_by_student': true}).eq('id', ticketId);
+      if(mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ticket removed from history.")));
+      }
     } catch (e) {
-      AppLogger.error('Failed to load tickets', tag: 'TICKET_HISTORY', error: e);
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Failed to load tickets. Please try again.';
-      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
     }
   }
 
-  void _clearError() {
-    setState(() {
-      _errorMessage = '';
-    });
+  void _showDeleteDialog(String ticketId) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Remove Ticket?"),
+        content: const Text("This will hide the ticket from your app. It will not delete the purchase record."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _hideTicket(ticketId);
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text("Remove"),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -52,135 +52,70 @@ class _TicketHistoryScreenState extends State<TicketHistoryScreen> {
         title: const Text('Ticket History'),
         backgroundColor: Colors.green,
         foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadTickets,
-          ),
-        ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _errorMessage.isNotEmpty
-          ? Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.error, size: 64, color: Colors.red),
-            const SizedBox(height: 16),
-            Text(
-              _errorMessage,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () {
-                _clearError();
-                _loadTickets();
-              },
-              child: const Text('Try Again'),
-            ),
-          ],
-        ),
-      )
-          : _tickets.isEmpty
-          ? const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.confirmation_number, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text(
-              'No tickets found',
-              style: TextStyle(fontSize: 18, color: Colors.grey),
-            ),
-            SizedBox(height: 8),
-            Text(
-              'Book your first ticket to get started!',
-              style: TextStyle(color: Colors.grey),
-            ),
-          ],
-        ),
-      )
-          : RefreshIndicator(
-        onRefresh: _loadTickets,
-        child: ListView.builder(
-          itemCount: _tickets.length,
-          itemBuilder: (context, index) {
-            final ticket = _tickets[index];
-            return Card(
-              margin: const EdgeInsets.all(8),
-              elevation: 2,
-              child: ListTile(
-                leading: Container(
-                  width: 50,
-                  height: 50,
-                  decoration: BoxDecoration(
-                    color: ticket.isUsed ? Colors.grey : Colors.green,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    ticket.isUsed ? Icons.history : Icons.confirmation_number,
-                    color: Colors.white,
-                    size: 30,
-                  ),
-                ),
-                title: Text(
-                  'Bus ${ticket.busId}',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
-                ),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const SizedBox(height: 4),
-                    Text(
-                      'Fare: ৳${ticket.fare.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Purchased: ${_formatDate(ticket.purchaseTime)}',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    if (ticket.usageTime != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        'Used: ${_formatDate(ticket.usageTime!)}',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ],
-                  ],
-                ),
-                trailing: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: ticket.isUsed ? Colors.grey[300] : Colors.green[100],
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Text(
-                    ticket.isUsed ? 'USED' : 'ACTIVE',
-                    style: TextStyle(
-                      color: ticket.isUsed ? Colors.grey[700] : Colors.green[800],
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
+      body: StreamBuilder<List<Map<String, dynamic>>>(
+        stream: _supabase
+            .from('tickets')
+            .stream(primaryKey: ['id'])
+            .eq('student_id', widget.studentId)
+            .order('purchase_time', ascending: false),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+
+          final allTickets = snapshot.data!;
+          // Filter out hidden tickets
+          final tickets = allTickets.where((t) => t['is_hidden_by_student'] != true).toList();
+
+          if (tickets.isEmpty) {
+            return const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.history, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text('History is clean', style: TextStyle(fontSize: 18, color: Colors.grey)),
+                ],
               ),
             );
-          },
-        ),
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(8),
+            itemCount: tickets.length,
+            itemBuilder: (context, index) {
+              final ticket = tickets[index];
+              final isUsed = ticket['is_used'] as bool;
+              final date = DateTime.parse(ticket['purchase_time']);
+
+              return Card(
+                elevation: 2,
+                child: ListTile(
+                  onLongPress: () => _showDeleteDialog(ticket['id']), // <--- LONG PRESS HERE
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: isUsed ? Colors.grey : Colors.green,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(isUsed ? Icons.history : Icons.confirmation_number, color: Colors.white),
+                  ),
+                  title: Text('Bus ${ticket['bus_id']}'),
+                  subtitle: Text(DateFormat('dd MMM yyyy, h:mm a').format(date)),
+                  trailing: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(isUsed ? 'USED' : 'ACTIVE',
+                          style: TextStyle(fontWeight: FontWeight.bold, color: isUsed ? Colors.grey : Colors.green)),
+                      const SizedBox(height: 4),
+                      Text("৳${ticket['fare']}"),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
       ),
     );
-  }
-
-  String _formatDate(DateTime date) {
-    return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
   }
 }

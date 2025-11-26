@@ -170,15 +170,18 @@ class SupabaseService {
     }
   }
 
+  // REPLACE your existing getStopsForRoute method with this:
   Future<List<BusStop>> getStopsForRoute(String routeId) async {
     _checkInitialization();
     try {
       AppLogger.debug('Fetching stops for route: $routeId', tag: 'SUPABASE');
+
+      // We explicitly cast the routeId to string to match the 'text' column in database
       final response = await _client
           .from('stops')
           .select()
           .eq('route_id', routeId)
-          .order('stop_order');
+          .order('stop_order', ascending: true); // Explicit ascending order
 
       if (response != null && response is List) {
         final stops = response
@@ -187,7 +190,6 @@ class SupabaseService {
         AppLogger.debug('Found ${stops.length} stops for route $routeId', tag: 'SUPABASE');
         return stops;
       }
-      AppLogger.debug('No stops found for route $routeId', tag: 'SUPABASE');
       return [];
     } catch (e) {
       AppLogger.error('Failed to get stops for route: $routeId', tag: 'SUPABASE', error: e);
